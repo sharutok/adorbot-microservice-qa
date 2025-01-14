@@ -1,3 +1,4 @@
+import time
 from flask import Flask, request, jsonify
 from pymilvus import (
     connections,
@@ -9,8 +10,9 @@ from pymilvus import (
 )
 import uuid
 import os
-from langchain_openai import OpenAIEmbeddings
 from dotenv import load_dotenv
+from embeddings import get_embedding_function
+import tiktoken
 
 load_dotenv()
 app = Flask(__name__)
@@ -35,21 +37,17 @@ def initialize_collection():
     """Initialize Milvus collection with proper index settings."""
     try:
         # Drop existing collection if it exists
-        if utility.has_collection(collection_name):
-            utility.drop_collection(collection_name)
+        # if utility.has_collection(collection_name):
+        #     utility.drop_collection(collection_name)
 
         # Create new collection
         fields = [
-            FieldSchema(
-                name="id",
-                dtype=DataType.VARCHAR,
-                max_length=36,
-                is_primary=True,
-                auto_id=False,
-            ),
+            FieldSchema(name="id",dtype=DataType.VARCHAR,max_length=36,is_primary=True,auto_id=False),
             FieldSchema(name="question", dtype=DataType.VARCHAR, max_length=1000),
             FieldSchema(name="answer", dtype=DataType.VARCHAR, max_length=1000),
-            FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=3072),
+            FieldSchema(
+                name="embedding", dtype=DataType.FLOAT_VECTOR, dim=1536, 
+            ),
         ]
 
         schema = CollectionSchema(fields, description="Collection for QA data")
@@ -75,15 +73,6 @@ collection = initialize_collection()
 collection.load()
 
 
-def get_embedding_function():
-    try:
-        return OpenAIEmbeddings(
-            api_key=os.getenv("OPENAI_API_KEY"), model="text-embedding-3-large"
-        )
-    except Exception as e:
-        raise RuntimeError(f"Failed to initialize embeddings: {e}")
-
-
 @app.route("/add", methods=["POST"])
 def add_qa_pair():
     """Add a Q&A pair with proper error handling."""
@@ -97,9 +86,16 @@ def add_qa_pair():
         id = str(uuid.uuid4())
 
         embeddings = get_embedding_function()
+
+        token_count = get_token_count(
+            question, model="text-embedding-3-small"
+        )
+
+        print(token_count)
+
         embedding = embeddings.embed_query(question)
 
-        insert_result = collection.insert(
+        collection.insert(
             [{"id": id, "question": question, "answer": answer, "embedding": embedding}]
         )
         collection.flush()  # Ensure the data is persisted
@@ -109,7 +105,7 @@ def add_qa_pair():
     except Exception as e:
         return jsonify({"error": str(e), "message": "Failed to add Q&A pair"}), 500
 
-
+'''
 @app.route("/query", methods=["POST"])
 def query_database():
     """Query the closest match using IP metric type."""
@@ -132,7 +128,7 @@ def query_database():
             data=[embedding],
             anns_field="embedding",
             param=search_params,
-            limit=1,
+            limit=7,
             output_fields=["question", "answer"],
         )
 
@@ -159,6 +155,85 @@ def query_database():
                         "similarity_score": float(
                             match.score
                         ),  # Convert to float for JSON serialization
+                    },
+                }
+            ),
+            200,
+        )
+
+    except Exception as e:
+        return jsonify({"error": str(e), "message": "Failed to process query"}), 500
+'''
+
+
+@app.route("/query", methods=["POST"])
+def query_database():
+    """Query multiple matches using IP metric type with similarity scores."""
+    try:
+        t1 = time.time()
+        data = request.json
+        if not data or "query" not in data:
+            return jsonify({"error": "Missing query field"}), 400
+
+        # Get limit parameter from request, default to 7 if not specified
+        limit = data.get("limit", 7)
+
+        query = data["query"]
+        embeddings = get_embedding_function()
+        embedding = embeddings.embed_query(query)
+
+        # Search parameters using IP metric type
+        search_params = {
+            "metric_type": "IP",  # Matching the index metric type
+            "params": {
+                "nprobe": 10,  # Number of clusters to search
+            },
+        }
+
+        results = collection.search(
+            data=[embedding],
+            anns_field="embedding",
+            param=search_params,
+            limit=limit,
+            output_fields=["question", "answer"],
+        )
+        t2 = time.time()
+        print("{} secs".format((t2 - t1)))
+        if not results or not results[0]:
+            return (
+                jsonify(
+                    {
+                        "message": "No matching results found",
+                        "status": "success",
+                        "data": None,
+                    }
+                ),
+                404,
+            )
+
+        # Process all matches
+        matches = []
+        for hit in results[0]:
+            similarity_score= float(hit.score) 
+            if similarity_score >=float(0.5):
+                matches.append(
+                    {
+                        "question": hit.entity.get("question"),
+                        "answer": hit.entity.get("answer"),
+                        "similarity_score": float(
+                            hit.score
+                        ),  # Convert to float for JSON serialization
+                    }
+                )
+
+        return (
+            jsonify(
+                {
+                    "status": "success",
+                    "data": {
+                        "matches": matches,
+                        "total_matches": len(matches),
+                        "query": query,
                     },
                 }
             ),
@@ -261,6 +336,18 @@ def health_check():
         )
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
+
+def get_token_count(text: str, model: str = "text-embedding-3-small") -> int:
+    try:  
+        encoding = tiktoken.encoding_for_model(model)
+        # Encode the text to count the tokens
+        tokens = encoding.encode(text)
+        print(tokens)
+        return len(tokens)
+
+    except Exception as e:
+        raise RuntimeError(f"Failed to calculate token count: {e}")
 
 
 if __name__ == "__main__":
