@@ -14,6 +14,10 @@ from dotenv import load_dotenv
 from embeddings import get_embedding_function
 import tiktoken
 
+from langchain.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+
+
 load_dotenv()
 app = Flask(__name__)
 
@@ -206,10 +210,7 @@ def query_database():
                         "message": "No matching results found",
                         "status": "success",
                         "data": None,
-                    }
-                ),
-                404,
-            )
+                    }),404,)
 
         # Process all matches
         matches = []
@@ -218,30 +219,49 @@ def query_database():
             if similarity_score >=float(0.5):
                 matches.append(
                     {
-                        "question": hit.entity.get("question"),
-                        "answer": hit.entity.get("answer"),
-                        "similarity_score": float(
-                            hit.score
-                        ),  # Convert to float for JSON serialization
+                        "pdf_name": hit.entity.get("question"),
+                        "pdf_link": hit.entity.get("answer"),
+                        # "similarity_score": float(hit.score),  
                     }
                 )
-
+        data=formated_response(matches)
         return (
-            jsonify(
-                {
-                    "status": "success",
-                    "data": {
-                        "matches": matches,
-                        "total_matches": len(matches),
-                        "query": query,
-                    },
-                }
-            ),
+            jsonify({"data": data}),
             200,
         )
+        # return (
+        #     jsonify(
+        #         {
+        #             "status": "success",
+        #             "data": {
+        #                 "matches": matches,
+        #                 "total_matches": len(matches),
+        #                 "query": query,
+        #             },
+        #         }
+        #     ),
+        #     200,
+        # )
 
     except Exception as e:
         return jsonify({"error": str(e), "message": "Failed to process query"}), 500
+
+def formated_response(response):
+    PROMPT_TEMPLATE = """
+                        You are an assistant tasked with formatting data into a clear and organized number-point list. Each item should include the name of the PDF and its corresponding link only.
+                        For Example:
+                        Lord Of the Rings : www.somelink.com
+                        Here is the data:
+                        {data}
+                        Format the data as follows:
+                        - pdf_name: pdf_link
+                        Ensure clarity and maintain the specified format as given in the example.
+                        """
+    prompt_template = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
+    prompt = prompt_template.format(data=response)
+    model = ChatOpenAI(model="gpt-4o-mini", api_key=os.getenv("OPENAI_API_KEY"))
+    response_text = model.invoke(prompt)
+    return response_text.content
 
 
 @app.route("/update", methods=["PUT"])
@@ -322,14 +342,14 @@ def health_check():
     """Health check endpoint with connection testing."""
     try:
         # Test Milvus connection
-        utility.list_collections()
+        # utility.list_collections()
         return (
             jsonify(
                 {
                     "status": "healthy",
                     "message": "Service is running",
-                    "collection_name": collection_name,
-                    "collection_loaded": collection.is_loaded,
+                    # "collection_name": collection_name,
+                    # "collection_loaded": collection.is_loaded,
                 }
             ),
             200,
@@ -348,7 +368,6 @@ def get_token_count(text: str, model: str = "text-embedding-3-small") -> int:
 
     except Exception as e:
         raise RuntimeError(f"Failed to calculate token count: {e}")
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=6000, debug=True)

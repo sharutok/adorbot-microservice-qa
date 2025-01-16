@@ -1,2 +1,6 @@
 .env
 volumes
+*.json
+*.jsonl
+*.rar
+*.xlsm
